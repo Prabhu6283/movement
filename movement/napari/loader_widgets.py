@@ -4,9 +4,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from napari._qt.layer_controls.qt_layer_controls_container import (
-    create_qt_layer_controls,
-)
+import pandas as pd
 from napari.components.dims import RangeTuple
 from napari.settings import get_settings
 from napari.utils.notifications import show_warning
@@ -24,7 +22,7 @@ from qtpy.QtWidgets import (
 
 from movement.io import load_bboxes, load_poses
 from movement.napari.convert import movement_ds_to_napari_tracks
-from movement.napari.layer_styles import PointsStyle
+from movement.napari.layer_styles import PointsStyle, TracksStyle
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +142,7 @@ class DataLoader(QWidget):
         file_path = self.file_path_edit.text()
         self.file_name = Path(file_path).name
 
-        # Load data
+        # Load data as a movement dataset
         if file_path == "":
             show_warning("No file path specified.")
             return
@@ -155,7 +153,7 @@ class DataLoader(QWidget):
         ds = loader.from_file(file_path, source_software, fps)
 
         # Convert to napari Tracks array
-        self.data, self.props = movement_ds_to_napari_tracks(ds)
+        self.data, self.properties = movement_ds_to_napari_tracks(ds)
         self.expected_frame_range = RangeTuple(
             start=0.0, stop=max(self.data[:, 1]), step=1.0
         )
@@ -167,8 +165,8 @@ class DataLoader(QWidget):
 
         # Set property to color by
         color_prop = "individual"
-        n_individuals = len(self.props["individual"].unique())
-        if n_individuals == 1 and "keypoint" in self.props:
+        n_individuals = len(self.properties["individual"].unique())
+        if n_individuals == 1 and "keypoint" in self.properties:
             color_prop = "keypoint"
         self.color_property = color_prop
 
@@ -190,45 +188,55 @@ class DataLoader(QWidget):
     def _add_points_layer(self):
         """Add the tracked data to the viewer as a Points layer."""
         # Define style for points layer
-        text_prop = "keypoint" if "keypoint" in self.props else "individual"
-        props_and_style = PointsStyle(
+        points_style = PointsStyle(
             name=f"data: {self.file_name}",
-            properties=self.props.iloc[self.bool_not_nan, :],
-            text={"string": text_prop, "visible": False},
+            text={
+                "string": (
+                    "keypoint"
+                    if "keypoint" in self.properties
+                    else "individual"
+                ),
+                "visible": False,
+            },
         )
 
-        # Color markers and text by selected property
-        props_and_style.set_color_by(prop=self.color_property)
+        # Color markers and optional text by selected property
+        points_style.set_color_by(self.color_property, self.properties)
 
         # Add data as a points layer
         self.viewer.add_points(
             self.data[self.bool_not_nan, 1:],
-            **props_and_style.as_kwargs(),
+            properties=self.properties.iloc[self.bool_not_nan, :],
+            **points_style.as_kwargs(),
         )
 
         logger.info("Added tracked dataset as a napari Points layer.")
 
     def _add_tracks_layer(self):
+        """Add the tracked data to the viewer as a Tracks layer."""
+        # Factorize the color property
+        # (required for tracks layer)
+        codes, _ = pd.factorize(self.properties[self.color_property])
+        color_property_factorized = self.color_property + "_factorized"
+        self.properties[color_property_factorized] = codes
+
         # Define style for tracks layer
+        # Note: tail_length needs to be set to the max number of frames
+        # to allow the tail and head length slider to work as expected
+        tracks_style = TracksStyle(
+            name=f"tracks: {self.file_name}",
+            color_by=self.color_property + "_factorized",
+            tail_length=int(self.expected_frame_range[1]),
+            head_length=0,
+        )
 
         # Add data as a tracks layer
         tracks_layer = self.viewer.add_tracks(
             self.data[self.bool_not_nan, :],
-            properties=self.props.iloc[self.bool_not_nan, :],
-            # color_by=self.color_property,
-            # colormap="turbo",
-            # head_length=int(self.expected_frame_range[1]),
-            tail_length=int(self.expected_frame_range[1]),
-            blending="opaque",
-            name=f"tracks: {self.file_name}",
+            properties=self.properties.iloc[self.bool_not_nan, :],
+            **tracks_style.as_kwargs(),
         )
-
-        # Set max and min of tail length slider to min max frames
-        # Note: the tail_length value above needs to be set to
-        # the max number of frames for this to work as expected
-        lc = create_qt_layer_controls(tracks_layer)
-        lc.tail_length_slider.setMinimum(0)
-        lc.tail_length_slider.setMaximum(int(self.expected_frame_range[1]))
+        tracks_layer.display_id = False  # Hide track IDs
 
         logger.info("Added tracked dataset as a napari Tracks layer.")
 
